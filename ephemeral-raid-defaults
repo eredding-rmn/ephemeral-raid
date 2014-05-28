@@ -1,0 +1,41 @@
+##### defaults for ephemeral-raid init process:
+# override default path to mdadm
+MDADM='/sbin/mdadm'
+
+# hardcode disks that should be available; if this is left empty, they will be discovered via aws meta-data
+#EPHEMERAL_DISKS='/dev/xvdba /dev/xvdbb /dev/xvdbc /dev/xvdbd'
+
+#hardcode disk quantity for raid
+#EPHEMERAL_DISK_COUNT=4
+
+#mdadm raid device name
+EPHEMERAL_RAID_DEVICE_NAME="ephemeral-raid0"
+
+# additional mdadm configuration options
+EPHEMERAL_RAID_DEVICE_OPTS="--chunk=1024"
+
+# mdadm raid level 
+EPHEMERAL_RAID_LEVEL=0
+
+# mdadm raid block device
+EPHEMERAL_RAID_DEVICE="/dev/md99"
+
+# partition used for filesystem; required if EPHEMERAL_RAID_SWAP=true
+#  if EPHEMERAL_RAID_SWAP=true, change to "${EPHEMERAL_RAID_DEVICE}p2"
+EPHEMERAL_RAID_FS_PARTITION="${EPHEMERAL_RAID_DEVICE}p2"
+
+# mount point for ephemeral raid fs:
+EPHEMERAL_RAID_FS_MOUNT_POINT="/srv/temp/"
+
+# raid device fs partition format command; 
+# note: if this doesn't exist, the parition will not be formatted
+EPHEMERAL_RAID_FS_FORMAT='mkfs.ext4'
+
+# configure a chunk of swap?
+EPHEMERAL_RAID_SWAP=true
+
+# swap partition size in megabytes; required if RAID_SWAP=true
+EPHEMERAL_RAID_SWAP_SIZE='1024'
+
+# device for swap; required if RAID_SWAP=true
+EPHEMERAL_RAID_SWAP_PARTITION="${EPHEMERAL_RAID_DEVICE}p1"

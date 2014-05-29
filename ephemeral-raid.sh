@@ -390,11 +390,10 @@ case "$1" in
         # 4 - service status unknown :-(
         # 5--199 reserved (5--99 LSB, 100--149 distro, 150--199 appl.)
         if status; then
-            echo_ok
             exit 3
         fi
         echo_ok
-        RETVAL=1
+        RETVAL=0
         ;;
     *)
         echo "Usage: $0 {start|stop|status|try-restart|condrestart|restart|force-reload|reload}"

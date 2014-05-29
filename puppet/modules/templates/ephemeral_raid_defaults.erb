@@ -1,0 +1,55 @@
+##### defaults for ephemeral-raid init process:
+# override default path to mdadm
+MDADM=<%= @mdadm_path %>
+
+# hardcode disks that should be available; if this is left empty, they will be discovered via aws meta-data
+<% if @ephemeral_disks -%>
+EPHEMERAL_DISKS="<% @ephemeral_disks.each do |disk| -%><%= disk %> <% end -%>"
+<% end -%>
+
+#hardcode disk quantity for raid
+<% if @ephemeral_disk_count -%>
+EPHEMERAL_DISK_COUNT=<% @ephemeral_disk_count %>
+<% end -%>
+
+#mdadm raid device name
+EPHEMERAL_RAID_DEVICE_NAME="<%= @raid_device_name %>"
+
+# additional mdadm configuration options
+EPHEMERAL_RAID_DEVICE_OPTS="<%= @raid_options %>"
+
+# mdadm raid level 
+EPHEMERAL_RAID_LEVEL="<%= @raid_level %>"
+
+# mdadm raid block device
+EPHEMERAL_RAID_DEVICE="<%= @raid_device %>"
+
+# partition used for filesystem; required if EPHEMERAL_RAID_SWAP=true
+#  if EPHEMERAL_RAID_SWAP=true, change to "${EPHEMERAL_RAID_DEVICE}p2"
+EPHEMERAL_RAID_FS_PARTITION="<%= @raid_fs_partition %>"
+
+# mount point for ephemeral raid fs:
+EPHEMERAL_RAID_FS_MOUNT_POINT="<%= @raid_fs_mount_point %>"
+
+# mount point owner; ex: root
+EPHEMERAL_RAID_FS_MOUNT_POINT_OWNER="<%= @raid_fs_mount_point_owner %>"
+
+# mount point group; ex: root
+EPHEMERAL_RAID_FS_MOUNT_POINT_GROUP="<%= @raid_fs_mount_point_group %>"
+
+# mount point mode; ex: 0755
+EPHEMERAL_RAID_FS_MOUNT_POINT_MODE="<%= @raid_fs_mount_point_mode %>"
+
+
+# raid device fs partition format command; 
+# note: if this doesn't exist, the parition will not be formatted
+EPHEMERAL_RAID_FS_FORMAT="<%= @raid_fs_format_command %>"
+
+# configure a chunk of swap?
+EPHEMERAL_RAID_SWAP="<%= @ephemeral_swap_allocated %>"
+
+# swap partition size in megabytes; required if RAID_SWAP=true
+EPHEMERAL_RAID_SWAP_SIZE="<%= @swap_space_in_mb %>"
+
+# device for swap; required if RAID_SWAP=true
+EPHEMERAL_RAID_SWAP_PARTITION="<%= @swap_partition %>"

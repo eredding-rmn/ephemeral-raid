@@ -116,6 +116,14 @@ EPHEMERAL_RAID_FS_MOUNT_POINT_GROUP=${EPHEMERAL_RAID_FS_MOUNT_POINT_GROUP:-"root
 EPHEMERAL_RAID_FS_MOUNT_POINT_MODE=${EPHEMERAL_RAID_FS_MOUNT_POINT_MODE:-755}
 PARTED='/sbin/parted'
 
+#### lets update some variables if we see specific items on the host...
+if [ -e /dev/md/md-device-map ]; then
+    md_device=$(awk -v dev=$EPHEMERAL_RAID_DEVICE_NAME '$0 ~ dev{print $4}' /dev/md/md-device-map)
+    if [ "x$md_device" != 'x' ]; then
+        EPHEMERAL_RAID_DEVICE=$md_device
+    fi
+fi
+
 ensure_dir () {
     if [ ! -d $1 ]; then
         mkdir -p $1
@@ -141,6 +149,11 @@ autodiscover_ephemeral_by_metadata () {
         EPHEMERAL_DISKS=''
         CMD='curl -qs http://169.254.169.254/latest/meta-data/block-device-mapping/'
         local ephemeral_disks=$(${CMD} | grep ephemeral)
+        if [ ! $? -eq 0 ]; then 
+            log_action_msg "CURL error; make sure curl is installed and we can run '$CMD'"
+            echo_fail
+            exit 1
+        fi
         if [ -z "${ephemeral_disks}" ]; then
             log_action_msg "No Ephemeral disks found!!"
             echo_ok
@@ -157,13 +170,33 @@ autodiscover_ephemeral_by_metadata () {
         log_action_msg "Discovered ($EPHEMERAL_DISK_COUNT): $EPHEMERAL_DISKS"
 }
 
+try_reassemble() {
+    log_action_msg "Attempting reassembly of $EPHEMERAL_RAID_DEVICE"
+    $MDADM --assemble $EPHEMERAL_RAID_DEVICE --name $EPHEMERAL_RAID_DEVICE_NAME
+    return $?
+}
+
+
+check_system_for_existing_raid_device () {
+    $MDADM --examine --brief --scan | grep $EPHEMERAL_RAID_DEVICE_NAME &> /dev/null
+    if [ $? -eq 0 ]; then
+        if [ -b $EPHEMERAL_RAID_DEVICE ]; then
+            return 0 
+        else
+            return 2
+        fi
+    else
+        return 1
+    fi
+}
+
 mk_raid () {
     if [ ! -e ${MDADM} ]; then
-        $log_daemon_msg "FAILED TO START; missing ${MDADM}"
+        log_daemon_msg "FAILED TO START; missing ${MDADM}"
         echo_fail
         exit 5
     fi;
-    $MDADM --create ${EPHEMERAL_RAID_DEVICE} --run --level ${EPHEMERAL_RAID_LEVEL} --chunk=1024 --name="${EPHEMERAL_RAID_DEVICE_NAME}" --raid-devices=${EPHEMERAL_DISK_COUNT} ${EPHEMERAL_DISKS}
+    $MDADM --create /dev/md/${EPHEMERAL_RAID_DEVICE_NAME} --run --level ${EPHEMERAL_RAID_LEVEL} --chunk=1024 --name="${EPHEMERAL_RAID_DEVICE_NAME}" --raid-devices=${EPHEMERAL_DISK_COUNT} ${EPHEMERAL_DISKS}
     retval=$?
     bail_check $retval "Ephemeral disk raid configuration FAILED"
     return $retval
@@ -176,6 +209,8 @@ stop_raid () {
         exit 5
     fi;
     $MDADM --stop ${EPHEMERAL_RAID_DEVICE}
+
+    #mdadm --stop $( awk -v dev=$EPHEMERAL_RAID_DEVICE_NAME '$0 ~ dev{print $4}' /dev/md/md-device-map) # centos mdadm; may need more impl-specific
 }
 
 mk_swap () {
@@ -248,7 +283,7 @@ mount_partition() {
     return $?
 }
 
-unmount_partition() {
+unmount_fs_partition() {
     UMNT=$(which umount)
     ${UMNT}  ${EPHEMERAL_RAID_FS_MOUNT_POINT%/}
     return $retval
@@ -277,7 +312,7 @@ bail_check() {
         if [[ "x$msg" != "x" ]]; then 
             log_action_msg "$msg"; 
         fi 
-        unmount_partition
+        unmount_fs_partition
         if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ]; then
             deactivate_swap
         fi
@@ -287,15 +322,66 @@ bail_check() {
     fi
 }
 
-start() {
-    status &> /dev/null
-    bail_check $?  "${EPHEMERAL_RAID_DEVICE} already exists; exiting..."
+reassembly_tasks() {
+     if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ] && [ -e $EPHEMERAL_RAID_SWAP_PARTITION ]; then
+        activate_swap
+        bail_check $?
+    elif is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ] && [ ! -e $EPHEMERAL_RAID_SWAP_PARTITION ]; then
+        stop_raid
+        try_reassemble
+        if [ ! -e $EPHEMERAL_RAID_SWAP_PARTITION ]; then
+            log_action_msg "after reassembly, there is still no swap partition and it is enabled; exiting!"
+            exit 1
+        fi
+    else
+        log_action_msg "Ephemeral swap skipped"
+    fi
+}
 
+start() {
+    log_daemon_msg "Starting $prog: " "${prog}"
+    status &> /dev/null
+    status_retval=$?
+    if [ $status_retval -eq 0 ]; then
+        # device isn't built.
+        if [ -z $EPHEMERAL_DISKS ]; then
+            autodiscover_ephemeral_by_metadata
+        fi
+        # attempt to rebuild
+        if try_reassemble; then
+            log_action_msg "Existing ephemeral raid configuration detected!"
+        else
+            mk_raid
+            mk_label ${EPHEMERAL_RAID_DEVICE}
+            if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ]; then
+                mk_partitions
+                mk_swap
+                bail_check $?
+            else
+                log_action_msg "Ephemeral swap skipped"
+            fi
+            mk_fs
+            bail_check $? "creating filesystem failed"
+        fi
+    elif [ $status_retval -eq 2 ]; then
+        try_reassemble;
+        if [ $? -eq 0 ]; then
+            reassembly_tasks
+        fi
+    else
+        reassembly_tasks
+    fi
+    mount_partition
+    bail_check $? "mounting partition failed"
+    echo_ok
+    return $RETVAL
+}
+
+# uber destructive!
+force_start () {
     if [ -z $EPHEMERAL_DISKS ]; then
         autodiscover_ephemeral_by_metadata
     fi
-
-    log_daemon_msg "Starting $prog: " "${prog}"
     mk_raid
     mk_label ${EPHEMERAL_RAID_DEVICE}
     if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ]; then
@@ -315,7 +401,7 @@ start() {
 
 stop() {
     log_daemon_msg "Shutting down $prog: " "${prog}"
-    unmount_partition
+    unmount_fs_partition
     bail_check $? "Failed to unmount $EPHEMERAL_RAID_FS_MOUNT_POINT"
     if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ]; then
         deactivate_swap
@@ -329,19 +415,25 @@ stop() {
 }
 
 status() {
-    if [ -e $EPHEMERAL_RAID_DEVICE ]; then
+    check_system_for_existing_raid_device
+    retval=$?
+    if [ $retval -eq 0 ]; then
         log_action_msg "${prog} $EPHEMERAL_RAID_DEVICE exists.. "
-        if is_true is_mounted; then
+        if is_mounted; then
             log_action_msg "$EPHEMERAL_RAID_FS_MOUNT_POINT mounted.. "
         fi
         return 1
+    elif [ $retval -eq 2 ]; then
+        log_action_msg "${prog} mdadm sees $EPHEMERAL_RAID_DEVICE; but block device doesn't exist"
+        return 1
     else
-        log_action_msg "${prog} $EPHEMERAL_RAID_DEVICE does not exist; not started"
+        log_action_msg "${prog} $EPHEMERAL_RAID_DEVICE does not exist"
         return 0
     fi 
 }
 
 moarstatus() {
+    $MDADM --examine --brief --scan
     if [ -b $EPHEMERAL_RAID_DEVICE ]; then 
         ${PARTED} $EPHEMERAL_RAID_DEVICE --script -- print 
     else
@@ -362,7 +454,7 @@ case "$1" in
         stop
         RETVAL=$?
         ;;
-    restart|try-restart|condrestart|reload|force-reload)
+    restart|try-restart|condrestart|reload)
         ## Stop the service and regardless of whether it was
         ## running or not, start it again.
         # 
@@ -370,8 +462,14 @@ case "$1" in
         ## RH has a similar command named condrestart.
         # THIS IS A DESTRUCTIVE PROCESS
         log_action_msg "No action being taken. This is a destructive process.  I just saved your life.  You're welcome."
+        log_action_msg "use force-reload if you are changing geometry!"
         echo_ok
         RETVAL=3
+        ;;
+    force-reload)
+        stop
+        force_start
+        RETVAL=$?
         ;;
     moar-status)
         ### this is a diagnostic, non-lsb compliant level; outputs various bits of data we check 
@@ -389,6 +487,7 @@ case "$1" in
         # 3 - service not running (unused)
         # 4 - service status unknown :-(
         # 5--199 reserved (5--99 LSB, 100--149 distro, 150--199 appl.)
+        # we check that status returns a 1, meaninng that we didn't see the block device.
         if status; then
             exit 3
         fi

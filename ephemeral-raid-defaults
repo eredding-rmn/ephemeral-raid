@@ -27,6 +27,16 @@ EPHEMERAL_RAID_FS_PARTITION="${EPHEMERAL_RAID_DEVICE}p2"
 # mount point for ephemeral raid fs:
 EPHEMERAL_RAID_FS_MOUNT_POINT="/srv/temp/"
 
+# mount point owner; ex: root
+EPHEMERAL_RAID_FS_MOUNT_POINT_OWNER="root"
+
+# mount point group; ex: root
+EPHEMERAL_RAID_FS_MOUNT_POINT_GROUP="root"
+
+# mount point mode; ex: 0755
+EPHEMERAL_RAID_FS_MOUNT_POINT_MODE="0755"
+
+
 # raid device fs partition format command; 
 # note: if this doesn't exist, the parition will not be formatted
 EPHEMERAL_RAID_FS_FORMAT='mkfs.ext4'

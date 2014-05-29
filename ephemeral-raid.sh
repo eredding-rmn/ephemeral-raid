@@ -124,6 +124,13 @@ if [ -e /dev/md/md-device-map ]; then
     fi
 fi
 
+# bail fast
+if [ ! -e ${MDADM} ]; then
+    log_daemon_msg "FAILED TO START; missing ${MDADM}"
+    echo_fail
+    exit 5
+fi;
+
 ensure_dir () {
     if [ ! -d $1 ]; then
         mkdir -p $1
@@ -176,7 +183,10 @@ try_reassemble() {
     return $?
 }
 
-
+# exit codes:
+# 0 if mdadm sees device, and the block device exists
+# 1 if mdadm doesn't see the device
+# 2 if mdadm sees the device, but there's no block device.
 check_system_for_existing_raid_device () {
     $MDADM --examine --brief --scan | grep $EPHEMERAL_RAID_DEVICE_NAME &> /dev/null
     if [ $? -eq 0 ]; then
@@ -191,11 +201,6 @@ check_system_for_existing_raid_device () {
 }
 
 mk_raid () {
-    if [ ! -e ${MDADM} ]; then
-        log_daemon_msg "FAILED TO START; missing ${MDADM}"
-        echo_fail
-        exit 5
-    fi;
     $MDADM --create /dev/md/${EPHEMERAL_RAID_DEVICE_NAME} --run --level ${EPHEMERAL_RAID_LEVEL} --chunk=1024 --name="${EPHEMERAL_RAID_DEVICE_NAME}" --raid-devices=${EPHEMERAL_DISK_COUNT} ${EPHEMERAL_DISKS}
     retval=$?
     bail_check $retval "Ephemeral disk raid configuration FAILED"
@@ -271,12 +276,10 @@ mount_partition() {
     if [ -d $EPHEMERAL_RAID_FS_MOUNT_POINT ]; then
         log_action_msg "$EPHEMERAL_RAID_FS_MOUNT_POINT exists... "
     fi
-    if is_true is_mounted; then
-        log_action_msg "$EPHEMERAL_RAID_FS_MOUNT_POINT already mounted; failing"
-        echo_fail
-        exit 1
+    if is_mounted; then
+        log_action_msg "$EPHEMERAL_RAID_FS_MOUNT_POINT already mounted"
+        return 0
     fi
-
     ensure_dir $EPHEMERAL_RAID_FS_MOUNT_POINT
     ${MNT}  ${EPHEMERAL_RAID_FS_PARTITION} ${EPHEMERAL_RAID_FS_MOUNT_POINT}
     set_mountpoint_permissions $EPHEMERAL_RAID_FS_MOUNT_POINT $EPHEMERAL_RAID_FS_MOUNT_POINT_OWNER
@@ -289,10 +292,24 @@ unmount_fs_partition() {
     return $retval
 }
 
+is_swap_active() {
+    bdmap_p1=$(readlink ${EPHEMERAL_RAID_SWAP_PARTITION})
+    grep ${bdmap_p1##../} /proc/swaps &> /dev/null
+    return $?
+}
+
 activate_swap() {
+    if is_swap_active; then 
+        log_action_msg "Swap ${EPHEMERAL_RAID_SWAP_PARTITION} previously activated" 
+        return 0;
+    fi
     /sbin/swapon ${EPHEMERAL_RAID_SWAP_PARTITION} 
-    bail_check $?  "FAILURE: Swap ${EPHEMERAL_RAID_SWAP_PARTITION} failed to activate";
-    log_action_msg "Swap ${EPHEMERAL_RAID_SWAP_PARTITION} activated" 
+    retval=$?
+    if [ ! $retval -eq 0 ]; then
+        log_action_msg "FAILURE: Swap ${EPHEMERAL_RAID_SWAP_PARTITION} failed to activate; check 'swapon -s'";
+    else
+        log_action_msg "Swap ${EPHEMERAL_RAID_SWAP_PARTITION} activated" 
+    fi
     return $retval
 }
 
@@ -323,11 +340,10 @@ bail_check() {
 }
 
 reassembly_tasks() {
-     if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ] && [ -e $EPHEMERAL_RAID_SWAP_PARTITION ]; then
+     if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ] && [ -b $EPHEMERAL_RAID_SWAP_PARTITION ]; then
         activate_swap
-        bail_check $?
-    elif is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ] && [ ! -e $EPHEMERAL_RAID_SWAP_PARTITION ]; then
-        stop_raid
+    elif is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ] && [ ! -b $EPHEMERAL_RAID_SWAP_PARTITION ]; then
+        stop_raid &> /dev/null
         try_reassemble
         if [ ! -e $EPHEMERAL_RAID_SWAP_PARTITION ]; then
             log_action_msg "after reassembly, there is still no swap partition and it is enabled; exiting!"
@@ -340,9 +356,9 @@ reassembly_tasks() {
 
 start() {
     log_daemon_msg "Starting $prog: " "${prog}"
-    status &> /dev/null
+    check_system_for_existing_raid_device &> /dev/null
     status_retval=$?
-    if [ $status_retval -eq 0 ]; then
+    if [ $status_retval -eq 1 ]; then
         # device isn't built.
         if [ -z $EPHEMERAL_DISKS ]; then
             autodiscover_ephemeral_by_metadata
@@ -367,12 +383,14 @@ start() {
         try_reassemble;
         if [ $? -eq 0 ]; then
             reassembly_tasks
+            mount_partition
+            bail_check $? "mounting partition failed"
         fi
     else
         reassembly_tasks
+        mount_partition
+        bail_check $? "mounting partition failed"
     fi
-    mount_partition
-    bail_check $? "mounting partition failed"
     echo_ok
     return $RETVAL
 }
@@ -433,16 +451,22 @@ status() {
 }
 
 moarstatus() {
+    echo "===> mdadm"
     $MDADM --examine --brief --scan
+    echo "===> block device"
     if [ -b $EPHEMERAL_RAID_DEVICE ]; then 
         ${PARTED} $EPHEMERAL_RAID_DEVICE --script -- print 
     else
         log_action_msg "${EPHEMERAL_RAID_DEVICE} isn't created"
     fi
-    grep  ${EPHEMERAL_RAID_FS_MOUNT_POINT%/} /proc/mounts  
+    echo "===> /proc/mounts"
+    grep  ${EPHEMERAL_RAID_DEVICE_NAME%/} /proc/mounts  
     cat /proc/mdstat
+    echo "===> swap"
     swapon -s
+    echo "===> disk use"
     df -h
+    echo "===> end of extended status"
 }
 
 case "$1" in

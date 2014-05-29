@@ -116,13 +116,16 @@ EPHEMERAL_RAID_FS_MOUNT_POINT_GROUP=${EPHEMERAL_RAID_FS_MOUNT_POINT_GROUP:-"root
 EPHEMERAL_RAID_FS_MOUNT_POINT_MODE=${EPHEMERAL_RAID_FS_MOUNT_POINT_MODE:-755}
 PARTED='/sbin/parted'
 
-#### lets update some variables if we see specific items on the host...
+### lets update some variables if we see specific items on the host...
 if [ -e /dev/md/md-device-map ]; then
     md_device=$(awk -v dev=$EPHEMERAL_RAID_DEVICE_NAME '$0 ~ dev{print $4}' /dev/md/md-device-map)
     if [ "x$md_device" != 'x' ]; then
-        EPHEMERAL_RAID_DEVICE=$md_device
+        DETECTED_EPHEMERAL_RAID_DEVICE=$md_device
+    else
+        DETECTED_EPHEMERAL_RAID_DEVICE=''
     fi
 fi
+
 
 # bail fast
 if [ ! -e ${MDADM} ]; then
@@ -207,14 +210,10 @@ mk_raid () {
     return $retval
 }
 
+# stops raid on device handed to it 
 stop_raid () {
-    if [ ! -e ${MDADM} ]; then
-        log_action_msg "what are you doing trying to stop??? ERROR: missing ${MDADM}"
-        echo_fail
-        exit 5
-    fi;
-    $MDADM --stop ${EPHEMERAL_RAID_DEVICE}
-
+    BLKDEV=${1:-$EPHEMERAL_RAID_DEVICE}
+    $MDADM --stop ${BLKDEV}
     #mdadm --stop $( awk -v dev=$EPHEMERAL_RAID_DEVICE_NAME '$0 ~ dev{print $4}' /dev/md/md-device-map) # centos mdadm; may need more impl-specific
 }
 
@@ -294,8 +293,12 @@ unmount_fs_partition() {
 
 is_swap_active() {
     bdmap_p1=$(readlink ${EPHEMERAL_RAID_SWAP_PARTITION})
-    grep ${bdmap_p1##../} /proc/swaps &> /dev/null
-    return $?
+    if [ "x$bdmap_p1" != "x" ]; then 
+        grep ${bdmap_p1##../} /proc/swaps &> /dev/null
+        return $?
+    else 
+        return 1
+    fi
 }
 
 activate_swap() {
@@ -314,10 +317,12 @@ activate_swap() {
 }
 
 deactivate_swap () {
-    if /sbin/swapoff ${EPHEMERAL_RAID_SWAP_PARTITION}; then
-        log_action_msg "Swap ${EPHEMERAL_RAID_SWAP_PARTITION} deactivated" 
-    else 
-        log_action_msg "FAILURE: Swap ${EPHEMERAL_RAID_SWAP_PARTITION} failed to deactivate";
+    if is_swap_active; then 
+        if /sbin/swapoff ${EPHEMERAL_RAID_SWAP_PARTITION}; then
+            log_action_msg "Swap ${EPHEMERAL_RAID_SWAP_PARTITION} deactivated" 
+        else 
+            log_action_msg "FAILURE: Swap ${EPHEMERAL_RAID_SWAP_PARTITION} failed to deactivate";
+        fi
     fi
 }
 
@@ -354,6 +359,10 @@ reassembly_tasks() {
     fi
 }
 
+# output_current_raid_config() {
+#     ensure_dir /var/lib/ephemeral-raid
+# }
+
 start() {
     log_daemon_msg "Starting $prog: " "${prog}"
     check_system_for_existing_raid_device &> /dev/null
@@ -380,6 +389,14 @@ start() {
             bail_check $? "creating filesystem failed"
         fi
     elif [ $status_retval -eq 2 ]; then
+        if  [ "x$DETECTED_EPHEMERAL_RAID_DEVICE" != "x" ] || [ "$DETECTED_EPHEMERAL_RAID_DEVICE" != "$EPHEMERAL_RAID_DEVICE" ]; then
+            log_action_msg "We detected $DETECTED_EPHEMERAL_RAID_DEVICE, but this is not the device $EPHEMERAL_RAID_DEVICE specified in the configuration."
+            stop_raid ${DETECTED_EPHEMERAL_RAID_DEVICE}
+        else
+            log_action_msg "The device $EPHEMERAL_RAID_DEVICE specified in the configuration was detected as being active, however we cannot take action to stop the device that claims to be this array.  Please examine the RAID configuration."
+            echo_fail
+            exit 1;
+        fi
         try_reassemble;
         if [ $? -eq 0 ]; then
             reassembly_tasks
@@ -420,12 +437,10 @@ force_start () {
 stop() {
     log_daemon_msg "Shutting down $prog: " "${prog}"
     unmount_fs_partition
-    bail_check $? "Failed to unmount $EPHEMERAL_RAID_FS_MOUNT_POINT"
     if is_true "$EPHEMERAL_RAID_SWAP"  && [ ! -z "${EPHEMERAL_RAID_SWAP_PARTITION}" ]; then
         deactivate_swap
-    fi 
+    fi
     stop_raid
-    bail_check $? "Failed to stop RAID"
     echo_ok
     # No-op
     RETVAL=7

@@ -408,6 +408,12 @@ start() {
         mount_partition
         bail_check $? "mounting partition failed"
     fi
+    if [ ! -z $POST_CREATE_CMDS ]; then 
+        eval $POST_CREATE_CMDS
+        if [ $? -eq 1 ]; then 
+            log_action_msg "Error with POST_CREATE_CMDS!"
+        fi
+    fi
     echo_ok
     return $RETVAL
 }

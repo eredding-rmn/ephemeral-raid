@@ -22,7 +22,7 @@ EPHEMERAL_RAID_LEVEL=0
 #  that block device name. mdadm doesn't care and so we actually key off of 
 #  EPHEMERAL_RAID_DEVICE_NAME for conditions where we check if the device 
 #  previously exists.
-EPHEMERAL_RAID_DEVICE="/dev/md/ephemeral-raid0"
+EPHEMERAL_RAID_DEVICE="/dev/md/${EPHEMERAL_RAID_DEVICE_NAME}"
 
 # partition used for filesystem; required if EPHEMERAL_RAID_SWAP=true
 #  if EPHEMERAL_RAID_SWAP=true, change to "${EPHEMERAL_RAID_DEVICE}p2"
